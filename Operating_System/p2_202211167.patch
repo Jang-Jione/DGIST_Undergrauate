@@ -1,0 +1,401 @@
+diff --git a/kalloc.c b/kalloc.c
+index 1ab0164..4f48208 100644
+--- a/kalloc.c
++++ b/kalloc.c
+@@ -71,15 +71,16 @@ freerange(void *vstart, void *vend)
+   }
+ }
+ 
+-uint hash(int pid, char *vpn) {
+-  //TODO: Implement your own hash function
+-  return hash;
++uint hash(int pid, uint vpn) {
++  // hash 함수 느리면 굉장히 느려질 수 있다. (hash collision 많이 일어나게 디자인 하면)
++   uint hashed = (pid+1)*vpn;
++   return hashed % MAXENTRY;
+ }
+ 
+-void kfree(int pid, char *v){ // v is virtual address
++void kfree(int pid, char *v){ // v is virtual address (=VA)
+ 
+-  uint kv, idx;
+-  struct run *r;
++  uint kv, idx; // 가상 커널 주소, 인덱스
++  struct run *r; // ? P2V?
+   //TODO: Fill the code that supports kfree
+   //1. Find the corresponding physical address for given pid and VA
+   //To do 1), find the corresponding entry of inverted page table and read the PPN[idx]
+@@ -87,6 +88,82 @@ void kfree(int pid, char *v){ // v is virtual address
+   //3. For memset(), convert the physical address for free to kernel's virtual address by using P2V macro
+   //4. Insert the free page into kmem.freelist
+   // memset(kv, 1, PGSIZE); //TODO: You must perform memset for P2V(physical address);
++  
++  // implementation
++  uint pa; // 물리 주소
++
++  // 1. PID과 VA(여기서는 a로 주어졌다)를 이용해서 주소 찾기
++  // idx = hash(pid, v) % 40000; // 해시 함수로 인덱스 찾기, 이 때 inverted page table이 40,000개의 entry를 가지고 있기 때문에 이렇게 설정하였다.
++  
++  // 해시 충돌 처리를 위한 linear probing
++  // PTE_XV6[idx]는 inverted page table의 index라고 한다.
++  // while (PID[idx] != pid || VPN[idx] != (uint)v) {
++  //     idx = (idx + 1) % 40000;
++  // }
++  uint initial_idx;
++  initial_idx = hash(pid, (uint)v>>12) % MAXENTRY;
++  idx = initial_idx;
++    
++  // 찾고자 하는 엔트리를 찾거나 빈 공간을 찾을 때까지 검색
++  // do {
++  //     // 빈 공간이거나 찾고자 하는 엔트리를 찾은 경우
++  //     if (PID[idx] == -1 || (PID[idx] == pid && VPN[idx] == (uint)v>>12)) {
++  //         break;
++  //     }
++  //     idx = (idx + 1) % MAXENTRY;
++  // } while (idx != initial_idx);  // 한바퀴 돌았는지 체크
++  // 찾고자 하는 엔트리를 찾거나 빈 공간을 찾을 때까지 검색
++  do {
++      // 찾고자 하는 엔트리를 찾은 경우
++      if ((PID[idx] == pid) && (VPN[idx] == ((uint)v>>12))) {
++          break;
++      }
++      idx = (idx + 1) % MAXENTRY;
++  } while (idx != initial_idx);  // 한바퀴 돌았는지 체크
++
++  // // 찾은 엔트리가 유효한지 확인
++  // if (PTE_XV6[idx] == 0) {
++  //     return;
++  // }
++
++  pa = PPN[idx];  // 물리 주소 얻기
++
++  // 2. 물리적 주소를 커널 가상 주소로 변환하기 + memset => 공지사항에  기존 2번과 순서 바꾸라고 하셨음
++  // memset을 위해서 해야하는 작업이라고 한다.
++  kv = (uint)P2V(pa);
++
++  if (kv > 2415919104) {
++    // panic("kfree");
++    return; // kv 값에 쓰레기 값이 들어갈 수 있기 때문에 이런 작업을 해주어야 한다고 한다.
++  }
++
++  // 주소 유효성 검사 -> 기존 kfree 코드 참고
++  // if((uint)kv % PGSIZE || (uint)kv < (uint)end || V2P(kv) >= PHYSTOP)
++  //     panic("kfree");
++  // 이거 대신 위 코드를 사용하는 것 같다.
++
++  // memset은 주어진 메모리를 특정 값으로 초기화하는 역할을 한다고 한다.
++  // (시작 주소, 채울 값, 크기)
++  memset((char*)kv, 1, PGSIZE); // 메모리 초기화
++
++  // 3. PID[idx], VPN[idx], PPN[idx], PTE_XV6[idx] 초기화 하기
++  // 초기화는 main.c 참고해서 진행하면 된다.
++  PID[idx] = -1;
++  VPN[idx] = 0;
++  PPN[idx] = 0;
++  PTE_XV6[idx] = 0;
++
++  // 4. 이제 freelist에서 free를 해주면 된다. -> 기존 kfree 코드 참고
++  if (kmem.use_lock && !holding(&kmem.lock)) 
++      acquire(&kmem.lock);
++  // r = (struct run*)(uint)P2V(pa); // r에 저장, r은 pa P2V한 것이라고 했으므로
++  r = (struct run*)kv; 
++  // cprintf("%p",r);
++  r->next = kmem.freelist;
++  kmem.freelist = r;
++  if (kmem.use_lock && holding(&kmem.lock)) 
++      release(&kmem.lock);
++  // implementation
+ }
+ 
+ // Allocate one 4096-byte page of physical memory.
+@@ -123,19 +200,19 @@ kfree(char *v)
+ 
+ char*
+ kalloc(int pid, char *v)  // v is virtual address
++// 여기서 pid랑 가상 주소 받음
+ {
+-
+   int idx;
+   struct run *r; 
+ 
+ // Do not modify this code
+   if (kinit_flag == 0) {
+-	  if(kmem.use_lock)
++	  if (kmem.use_lock && !holding(&kmem.lock)) 
+ 		acquire(&kmem.lock);
+-	r = kmem.freelist;
++	r = kmem.freelist; // free list에서 공간을 얻어옴
+ 	if(r)
+ 		kmem.freelist = r->next;
+-	if(kmem.use_lock)
++	if (kmem.use_lock && holding(&kmem.lock)) 
+ 		release(&kmem.lock);
+ 	return (char*)r;
+   }
+@@ -144,13 +221,15 @@ kalloc(int pid, char *v)  // v is virtual address
+ //Get free page from kmem.freelist
+ //if there is no free page in kmem.freelist, return NULL. On current implementation, (char*)r is NULL in that case.
+ 
+-  if(kmem.use_lock)
++  if (kmem.use_lock && !holding(&kmem.lock)) {
+     acquire(&kmem.lock);
++  }
+ 
+   r = kmem.freelist;
+   if (r) kmem.freelist = r->next;
+   else {
+-	  if (kmem.use_lock) release(&kmem.lock);
++	  if (kmem.use_lock && holding(&kmem.lock))
++        release(&kmem.lock);
+ 	  cprintf("No free memory\n");
+ 	  return (char*)r;
+   }
+@@ -166,8 +245,98 @@ kalloc(int pid, char *v)  // v is virtual address
+   //3. Update the value of PID[idx], VPN[idx] and PPN[idx] (Do not update the PTE_XV6[idx] in this code!)
+   //4. Return (char*)(*r), if there is no free space, return 0
+ 
+-  if(kmem.use_lock)
++  // implementation
++  // 1. inverted page table에서 빈 entry 찾기
++  // Use hash function and linear probing to find an empty entry
++  // idx = hash(pid, v) % 40000;
++
++  // while (PID[idx] != pid || VPN[idx] != (uint)v) {
++  //     idx = (idx + 1) % 40000;
++  // }
++  // cprintf("debug...\n");
++  if (kmem.use_lock && holding(&kmem.lock))
+     release(&kmem.lock);
++
++  uint initial_idx;
++  if ((uint)v != -1) {
++    initial_idx = hash(pid, (uint)v>>12) % MAXENTRY;
++    idx = initial_idx;
++  }
++  else {
++    initial_idx = hash(pid, (uint)r>>12) % MAXENTRY;
++    idx = initial_idx;
++  }
++
++  // 찾고자 하는 엔트리를 찾거나 빈 공간을 찾을 때까지 검색
++  do {
++      // 빈 공간이거나 찾고자 하는 엔트리를 찾은 경우
++      // xv6의 pid는 0부터 시작하기 때문에 초기값을 0으로 값아준다.
++      // 앗 아니어서 -1로 바꾸라고 하신건가..
++      if ((uint)v != -1) {
++        if ((PID[idx] == -1) || ((PID[idx] == pid) && (VPN[idx] == ((uint)v>>12)))) {
++            break;
++        }
++      }
++      else { // kernel일 경우에 처리
++        if ((PID[idx] == -1) || ((PID[idx] == 0) && (VPN[idx] == ((uint)r>>12)))) {
++            break;
++        }
++      }
++      idx = (idx + 1) % MAXENTRY; // linear probing
++  } while (idx != initial_idx);  // 한바퀴 돌았는지 체크 -> 계속 돌면 무한 루프 되므로
++
++  // cprintf("%d",idx);
++
++  // (4.)
++  // if (idx == initial_idx && (PID[idx] != -1)) { // 만약 가득 찼을 경우 -> 즉 한 바퀴 돌았는데도 못 찾았을 때, 이 때 PID가 -1이 아니라는 건 그 자리에 뭐가 있다는 것
++  //     // if (kmem.use_lock) // lock 위에서 잡았으므로
++  //     //     release(&kmem.lock);
++  //     // cprintf("No space in inverted page table\n");
++  //     return 0;
++  // }
++
++  if (idx == initial_idx && (PID[idx] == pid || PID[idx] == -1)) { // 만약 가득 찼을 경우 -> 즉 한 바퀴 돌았는데도 못 찾았을 때, 이 때 PID가 -1이 아니라는 건 그 자리에 뭐가 있다는 것
++      // if (kmem.use_lock) // lock 위에서 잡았으므로
++      //     release(&kmem.lock);
++      // cprintf("No space in inverted page table\n");
++      // return 0;
++  }
++  else if (idx == initial_idx) {
++    return 0;
++  }
++  else {
++  }
++
++  // 2. v가 -1인 건 kernel임을 의미한다? 가상 주소는 P2V에 의해서 결정된다?
++  // 뭐 커널의 가상 주소는 P2V에 의해서 결정된다는 것 같다.
++  // uint pa;
++  if ((uint)v == -1) {
++      VPN[idx] = (uint)r>>12; // r은 이미 P2V한 값이라고 하심! PGSIZE로 나누는 거나 >> 12하는 거랑 같을듯
++      // cprintf("%p",VPN[idx]);
++  } else {
++      VPN[idx] = (uint)v>>12;
++  }
++
++  // cprintf("%d",idx);
++  // 3. inverted page table에서 PID[idx], VPN[idx], PPN[idx] 업데이트하기
++  // cprintf("r (virtual address): %p\n", r);
++  // cprintf("V2P(r) (physical address): %p\n", V2P(r));
++
++  PID[idx] = pid;
++  PPN[idx] = (uint)V2P(r); // r은 가상 주소라고 했으므로
++  // cprintf("%p\n",PID[idx]);
++  // cprintf("%p\n",VPN[idx]);
++  // cprintf("%p\n",PPN[idx]);
++  // cprintf("%p\n",PTE_XV6[idx]);
++  // cprintf("%p  %p\n",PPN[idx], VPN[idx]);
++  // PTE_XV6[idx] = 1; // 이건 업데이트 할 필요 없는 것
++
++  // 4. Return (char*)(*r), 만약 free space가 없다면 return 0
++  // 4번은 위에 if문으로 구현해 두었다.
++  // 요기
++
++  // if(kmem.use_lock)
++  //   release(&kmem.lock);
+   return (char*)r; 
++  // 정리하자면 이 함수에서는 pid랑 가상 주소 받아서 inverted page에 할당해줌
+ }
+-
+diff --git a/main.c b/main.c
+index 0b6229e..4527343 100644
+--- a/main.c
++++ b/main.c
+@@ -24,7 +24,7 @@ int
+ main(void)
+ {
+   for (int i = 0; i < MAXENTRY; i++){
+-	PID[i] = 0;
++	PID[i] = -1;
+ 	VPN[i] = 0;
+ 	PPN[i] = 0;
+ 	PTE_XV6[i] = 0;
+diff --git a/vm.c b/vm.c
+index 479d68b..ad146bf 100644
+--- a/vm.c
++++ b/vm.c
+@@ -36,7 +36,28 @@ seginit(void)
+   lgdt(c->gdt, sizeof(c->gdt));
+ }
+ 
+-extern int hash(int pid, char *va);
++extern int hash(int pid, uint va);
++
++int searchit(const void *va, int pid) {
++    uint idx;
++    
++    // idx = hash(pid, (char*)va) % 40000;
++    
++    uint initial_idx;
++    initial_idx = hash(pid, (uint)va>>12) % MAXENTRY;
++    idx = initial_idx;
++      
++    // 찾고자 하는 엔트리를 찾거나 빈 공간을 찾을 때까지 검색
++    do {
++        // 찾고자 하는 엔트리를 찾은 경우
++        if ((PID[idx] == pid) && (VPN[idx] == ((uint)va>>12))) {
++            break;
++        }
++        idx = (idx + 1) % MAXENTRY;
++    } while (idx != initial_idx);  // 한바퀴 돌았는지 체크
++
++    return idx;
++}
+ 
+ // Return the address of the PTE in page table pgdir
+ // that corresponds to virtual address va.  If alloc!=0,
+@@ -45,17 +66,19 @@ extern int hash(int pid, char *va);
+ static pte_t *
+ ittraverse(int pid, pde_t *pgdir, const void *va, int alloc) //You don't have to consider the pgdir argument
+ {
++  // pgdir이나 alloc 같은 것은 안 건드려도 되는 것인듯,,
+ 	uint idx; 
+ 	//TODO: File the code that returns corresponding PTE_XV6[idx]'s address for given pid and VA
+ 	//1. Handle two case: the VA is over KERNBASE or not.
+ 	//2. For former case, return &PTE_KERN[(uint)V2P(physical address)];
+ 	//3. For latter case, find the phyiscal address for given pid and va using inverted page table, and return &PTE_XV6[idx]
+   if ((uint)va >= KERNBASE) {
++    // cprintf("debug"); // 와 여기 cprint 넣으면 절대 안됨!!
+     return &PTE_KERN[(uint)V2P(va)/PGSIZE]; 
+   }
+   else{
+-	//Implement 3) in here	
+-	return &PTE_XV6[idx];
++      idx = searchit(va, pid);
++      return &PTE_XV6[idx];
+   }
+ }
+ 
+@@ -98,9 +121,16 @@ mappages(int pid, int is_kernel, pde_t *pgdir, void *va, uint size, uint pa, int
+       pte = ittraverse(pid, pgdir, a, 1);
+     if(pte == 0)
+       return -1;
+-    if(*pte & PTE_P)
++    if(*pte & PTE_P) {
++      // cprintf("Pid: \n", pid);
++      // cprintf("Attempting to map VA: %x, PA: %x\n", va, pa);
++      // cprintf("Current PTE: %x\n", *pte);
++      // cprintf("Current PTE: %x\n", PTE_P);
++      // cprintf("Current kernel: %d\n", is_kernel);
+       panic("remap");
++    }
+     *pte = pa | perm | PTE_P;
++    // cprintf("Current PTE: %x\n", *pte);
+     if(a == last)
+       break;
+     a += PGSIZE;
+@@ -144,6 +174,7 @@ static struct kmap {
+  { (void*)DEVSPACE, DEVSPACE,      0,         PTE_W}, // more devices
+ };
+ 
++// V2P 부분은 무시하기, 이 부분은 전 버전에서도 빨간 줄 있더라,,
+ // Set up kernel part of a page table.
+ pde_t*
+ setupkvm(int is_kernel)
+@@ -291,13 +322,50 @@ allocuvm(int pid, pde_t *pgdir, uint oldsz, uint newsz, uint flags)
+ 
+ int
+ deallocuvm(int pid, pde_t *pgdir, uint oldsz, uint newsz){  // oldsz, newsz is virtual address
+-  pte_t *pte;
++  pte_t *pte; 
+   uint a, pa;
+   if(newsz >= oldsz)
+     return oldsz;
+-  a = PGROUNDUP(newsz);
++  a = PGROUNDUP(newsz); // page 경계에 맞춰 newsz 값을 저장하는 역할이라고 한다.
+   //TODO: File the code that free the allocated pages by users
+   //For range in (a <= va < oldsz), if there are some pages that the process allocates, call kfree(pid, v)
++  // (a <= va < oldsz) 범위에서 할당된 페이지들을 해제
++  // inverted page를 한 번의 스캔만으로 해제할 수 있게 해야지 10분 안돌아감 
++  // 이 함수는 남은 주소를 dalloc
++
++  // implementation
++  // char *va;  // 가상 주소를 저장할 변수 추가
++  // for(; a<oldsz; a+=PGSIZE) { // deallocuvm 함수 참고
++  //     va = (char*)a;
++  //     pte = ittraverse(pid, pgdir, va, 1);
++      
++  //     if(!pte || !(*pte & PTE_P)) {  // PTE가 없거나 Present bit가 없으면 스킵
++  //         continue;
++  //     }
++      
++  //     va = (char*)a;
++  //     kfree(pid, va);
++  //     *pte = 0;
++  // } 
++  // 반대로 table을 돌면서 그 사이의 값 free 시키기 -> 내가 생각해도 상당히 좋은 아이디어인듯 ㅋ
++  for (uint idx=0; idx<MAXENTRY; idx++) {
++    // pa = PTE_XV6[idx] & ~0xFFF;
++    // uint va = (uint)P2V(pa);
++    // if (PTE_XV6[idx] != 0) {
++    //   cprintf("%p, ",va);
++    //   cprintf("%p, ",newsz);
++    //   cprintf("%p, ",oldsz);
++    // }
++    uint va = VPN[idx]<<12; // 차피 offset은 page size에 맞게 한 번에 가니까 상관 없는듯
++    if ((PID[idx] == pid) && ((newsz <= va) && (va < oldsz))) {
++      // newsz < va로 하면 에러 생김
++      // cprintf("%p, ",va);
++      kfree(pid, (char*)(va));
++    }
++  }
++  // 문제 dalloc할 때 쓰는 것도 다 끊어버리는 문제?
++  // implementation
++  
+   return newsz; 
+ }
+ 
